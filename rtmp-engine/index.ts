@@ -1,23 +1,31 @@
+// Motor de Streaming RTMP e Ingesta de Video de Néctar Cast.
+// Desarrollado sobre Node-Media-Server (NMS) y orquestado mediante subprocesos locales de FFmpeg.
+// Expone un servidor HTTP de control (API local) para gestionar la retransmisión dinámica.
+
 import NodeMediaServer from 'node-media-server';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 
+// Límite de líneas almacenadas en memoria para el visor de logs del frontend
 const LOG_LIMIT = 200;
 const logsRingBuffer: string[] = [];
 
+// Registra logs tanto en la salida de consola estándar como en el búfer circular en memoria (ring buffer)
+// que es consultado periódicamente por el frontend a través de HTTP.
 function addLog(msg: string) {
   const time = new Date().toLocaleTimeString();
   const formatted = `[${time}] ${msg}`;
   console.log(formatted);
   logsRingBuffer.push(formatted);
+  // Si superamos el límite, descartamos el log más antiguo
   if (logsRingBuffer.length > LOG_LIMIT) {
     logsRingBuffer.shift();
   }
 }
 
-// Relays state management
+// Interfaz para representar un destino de retransmisión configurado
 interface Relay {
   id: string;
   name: string;
@@ -25,6 +33,7 @@ interface Relay {
   status: 'idle' | 'streaming' | 'error';
 }
 
+// Interfaz para mantener la referencia a un subproceso FFmpeg activo
 interface ActiveProcess {
   id: string;
   process: ChildProcess;
@@ -32,22 +41,30 @@ interface ActiveProcess {
 
 let relays: Relay[] = [];
 let activeProcesses: ActiveProcess[] = [];
-let isStreamActive = false;
+let isStreamActive = false; // Indica si OBS está transmitiendo activamente a esta app
 const startTime = Date.now();
 
-// Setup paths
+// Resuelve si el código está empaquetado (pkg) o ejecutándose de forma directa en desarrollo
 const isPackaged = typeof (process as any).pkg !== 'undefined';
 const baseDir = isPackaged ? path.dirname(process.execPath) : process.cwd();
+// Ruta de almacenamiento local de las configuraciones de destinos de retransmisión
 const relaysConfigFile = path.join(baseDir, 'relays-config.json');
 
-// Load configurations
+// Lee y decodifica las variables de entorno de red inyectadas por el backend de Rust (Tauri)
+const rtmpPort = process.env.RTMP_PORT ? parseInt(process.env.RTMP_PORT) : 1935;
+const httpApiPort = process.env.HTTP_PORT ? parseInt(process.env.HTTP_PORT) : 8001;
+// El puerto HTTP de NMS para reproducción web (ej. HTTP-FLV) se calcula para evitar colisiones
+const nmsHttpPort = process.env.HTTP_PORT ? parseInt(process.env.HTTP_PORT) - 1 : 8000;
+
+// Carga la configuración guardada de destinos en disco
 function loadConfig() {
   try {
     if (fs.existsSync(relaysConfigFile)) {
       const data = fs.readFileSync(relaysConfigFile, 'utf-8');
+      // Al reiniciar la app, todos los flujos de retransmisión inician en estado 'idle' (apagado)
       relays = JSON.parse(data).map((r: any) => ({
         ...r,
-        status: 'idle' // Reset status on startup
+        status: 'idle'
       }));
       addLog(`Loaded ${relays.length} relays from configuration file.`);
     } else {
@@ -60,7 +77,7 @@ function loadConfig() {
   }
 }
 
-// Save configurations
+// Escribe la lista de destinos de retransmisión configurados a disco (excluyendo estados efímeros)
 function saveConfig() {
   try {
     const dataToSave = relays.map(({ id, name, targetUrl }) => ({ id, name, targetUrl }));
@@ -71,7 +88,9 @@ function saveConfig() {
   }
 }
 
-// Resolve FFmpeg path
+// Resolución del binario FFmpeg.
+// En producción, el binario FFmpeg empaquetado como sidecar se copia en el mismo directorio que este ejecutable.
+// El nombre del archivo incluye el target triple del compilador de Rust (ej: ffmpeg-x86_64-unknown-linux-gnu).
 let ffmpegPath = 'ffmpeg';
 const targetTriple = process.env.TAURI_TARGET_TRIPLE || 'x86_64-unknown-linux-gnu';
 const sidecarFFmpeg = path.join(baseDir, `ffmpeg-${targetTriple}`);
@@ -84,10 +103,11 @@ if (fs.existsSync(sidecarFFmpeg)) {
   ffmpegPath = sidecarFFmpegWin;
   addLog(`Using bundled FFmpeg: ${ffmpegPath}`);
 } else {
+  // Si no se encuentra empaquetado localmente, se busca en las rutas globales del sistema operativo
   addLog(`FFmpeg sidecar not found at: ${sidecarFFmpeg}. Falling back to system path 'ffmpeg'.`);
 }
 
-// Start a single relay
+// Inicia un subproceso de FFmpeg para duplicar el stream hacia una plataforma
 function startRelayProcess(relay: Relay) {
   if (activeProcesses.some(ap => ap.id === relay.id)) {
     addLog(`Relay ${relay.name} is already running.`);
@@ -96,14 +116,13 @@ function startRelayProcess(relay: Relay) {
 
   addLog(`Starting FFmpeg relay for: ${relay.name} -> ${relay.targetUrl}`);
   
-  // Input is the local RTMP stream intake
-  const inputUrl = 'rtmp://127.0.0.1:1935/live/test';
+  // Dirección de ingesta RTMP interna local
+  const inputUrl = `rtmp://127.0.0.1:${rtmpPort}/live/test`;
   
-  // Spawn FFmpeg process
-  // -re: read input at native frame rate (important for RTMP relaying sometimes, though -c copy usually doesn't need it. We will use -i first)
-  // -i: input url
-  // -c copy: copy video/audio codecs directly without transcoding (0% CPU cost!)
-  // -f flv: force format to flv
+  // Argumentos de FFmpeg:
+  // -i: ruta del flujo de ingesta local
+  // -c copy: copia directa de video y audio (no recodifica, reduce el consumo de CPU a 0%)
+  // -f flv: obliga a utilizar el formato de contenedor FLV requerido por RTMP
   const args = ['-i', inputUrl, '-c', 'copy', '-f', 'flv', relay.targetUrl];
   
   const ffmpeg = spawn(ffmpegPath, args);
@@ -114,16 +133,17 @@ function startRelayProcess(relay: Relay) {
     process: ffmpeg
   });
 
+  // Escucha la salida estándar del subproceso
   ffmpeg.stdout?.on('data', (data) => {
     addLog(`[FFmpeg-${relay.name}] ${data.toString().trim()}`);
   });
 
+  // Escucha los reportes de progreso y errores de FFmpeg
   ffmpeg.stderr?.on('data', (data) => {
     const line = data.toString().trim();
-    // Only log essential messages to keep console readable
+    // Filtra las estadísticas repetitivas de fotogramas para no saturar los logs
     if (line.includes('frame=') || line.includes('fps=') || line.includes('speed=')) {
-      // Periodic stats
-      if (Math.random() < 0.1) { // Log occasionally to avoid spam
+      if (Math.random() < 0.1) { // Loguea ocasionalmente
         addLog(`[FFmpeg-${relay.name} Status] ${line}`);
       }
     } else {
@@ -131,6 +151,7 @@ function startRelayProcess(relay: Relay) {
     }
   });
 
+  // Controlador para cuando el subproceso finaliza
   ffmpeg.on('close', (code) => {
     addLog(`FFmpeg relay process for ${relay.name} exited with code ${code}`);
     activeProcesses = activeProcesses.filter(ap => ap.id !== relay.id);
@@ -139,18 +160,19 @@ function startRelayProcess(relay: Relay) {
     }
   });
 
+  // Captura problemas al lanzar el proceso
   ffmpeg.on('error', (err) => {
     addLog(`Error in FFmpeg process for ${relay.name}: ${err.message}`);
     relay.status = 'error';
   });
 }
 
-// Stop a single relay
+// Detiene un flujo de retransmisión matando su subproceso de FFmpeg
 function stopRelayProcess(id: string) {
   const active = activeProcesses.find(ap => ap.id === id);
   if (active) {
     addLog(`Stopping relay process: ${id}`);
-    active.process.kill('SIGKILL'); // Force terminate
+    active.process.kill('SIGKILL'); // Fuerza la terminación del proceso
     activeProcesses = activeProcesses.filter(ap => ap.id !== id);
   }
   const relay = relays.find(r => r.id === id);
@@ -159,7 +181,7 @@ function stopRelayProcess(id: string) {
   }
 }
 
-// Stop all running relays
+// Detiene todas las retransmisiones activas (útil al detener el directo en OBS)
 function stopAllRelays() {
   addLog('Stopping all active FFmpeg relays.');
   for (const ap of activeProcesses) {
@@ -171,23 +193,24 @@ function stopAllRelays() {
   }
 }
 
-// Initialize NMS
+// Configuración e inicio del servidor RTMP (NodeMediaServer)
 const nmsConfig = {
   rtmp: {
-    port: 1935,
+    port: rtmpPort,
     chunk_size: 60000,
     gop_cache: true,
     ping: 30,
     ping_timeout: 60
   },
   http: {
-    port: 8000,
+    port: nmsHttpPort,
     allow_origin: '*'
   }
 };
 
 const nms = new NodeMediaServer(nmsConfig);
 
+// Evento disparado cuando OBS inicia la transmisión hacia esta app
 nms.on('postPublish', (id, streamPath, args) => {
   addLog(`Inbound stream published: id=${id} path=${streamPath}`);
   if (streamPath === '/live/test') {
@@ -196,24 +219,25 @@ nms.on('postPublish', (id, streamPath, args) => {
   }
 });
 
+// Evento disparado cuando OBS detiene la transmisión hacia esta app
 nms.on('donePublish', (id, streamPath, args) => {
   addLog(`Inbound stream unpublished: id=${id} path=${streamPath}`);
   if (streamPath === '/live/test') {
     isStreamActive = false;
-    stopAllRelays();
+    stopAllRelays(); // Detiene inmediatamente todas las copias activas de FFmpeg
   }
 });
 
-// Load stored configurations on boot
+// Carga las configuraciones de disco en el arranque
 loadConfig();
 
-// Start NMS
+// Arranca el motor RTMP
 nms.run();
-addLog('Node-Media-Server is running on RTMP:1935, HTTP:8000');
+addLog(`Node-Media-Server is running on RTMP:${rtmpPort}, HTTP:${nmsHttpPort}`);
 
-// Create API Control HTTP Server
+// Creación de la API de control HTTP local
 const apiServer = http.createServer((req, res) => {
-  // CORS Headers
+  // Inyección de cabeceras CORS para permitir peticiones desde la app de Tauri (Vite en puerto 1420)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -227,7 +251,7 @@ const apiServer = http.createServer((req, res) => {
   const url = req.url || '';
   addLog(`API Request: ${req.method} ${url}`);
 
-  // GET /status
+  // Retorna el estado general, tiempo de actividad y destinos configurados
   if (url === '/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -243,14 +267,14 @@ const apiServer = http.createServer((req, res) => {
     return;
   }
 
-  // GET /logs
+  // Retorna el búfer circular de logs acumulados
   if (url === '/logs' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ logs: logsRingBuffer }));
     return;
   }
 
-  // POST /relays/add
+  // Agrega un nuevo destino de retransmisión y lo guarda a disco
   if (url === '/relays/add' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
@@ -280,7 +304,7 @@ const apiServer = http.createServer((req, res) => {
     return;
   }
 
-  // POST /relays/start/:id
+  // Inicia la retransmisión hacia un destino específico
   if (url.startsWith('/relays/start/') && req.method === 'POST') {
     const id = url.split('/').pop() || '';
     const relay = relays.find(r => r.id === id);
@@ -300,7 +324,7 @@ const apiServer = http.createServer((req, res) => {
     return;
   }
 
-  // POST /relays/stop/:id
+  // Detiene la retransmisión hacia un destino específico
   if (url.startsWith('/relays/stop/') && req.method === 'POST') {
     const id = url.split('/').pop() || '';
     stopRelayProcess(id);
@@ -309,7 +333,7 @@ const apiServer = http.createServer((req, res) => {
     return;
   }
 
-  // DELETE /relays/delete/:id
+  // Borra la configuración de un destino de retransmisión
   if (url.startsWith('/relays/delete/') && req.method === 'DELETE') {
     const id = url.split('/').pop() || '';
     stopRelayProcess(id);
@@ -320,11 +344,12 @@ const apiServer = http.createServer((req, res) => {
     return;
   }
 
-  // Not Found
+  // Ruta no encontrada
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Endpoint not found' }));
 });
 
-apiServer.listen(8001, () => {
-  addLog('HTTP Control API Server is running on port 8001');
+// Arranca el servidor de API
+apiServer.listen(httpApiPort, () => {
+  addLog(`HTTP Control API Server is running on port ${httpApiPort}`);
 });
