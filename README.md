@@ -104,8 +104,9 @@ Dado que Néctar Cast clona directamente el flujo original sin recodificar para 
 
 ## 🛠️ Empaquetado y Distribución
 
-Para generar el instalador de producción optimizado para tu sistema operativo (.AppImage, .deb, .exe, etc.):
+Para generar los instaladores de producción optimizados (.AppImage, .deb, .rpm):
 ```bash
-npm run tauri build
+# En sistemas modernos (como Fedora o Ubuntu) para evitar problemas de FUSE con AppImage:
+APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri build
 ```
 El instalador final se generará bajo `src-tauri/target/release/bundle/`.

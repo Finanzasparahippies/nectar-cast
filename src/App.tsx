@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { 
   Activity, Play, Square, Plus, Trash2, Radio, Terminal, 
-  RefreshCw, Cpu, Database, Settings, Shield, ExternalLink, HelpCircle, 
+  RefreshCw, Cpu, Database, HelpCircle, 
   AlertCircle, Sparkles, Instagram
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
@@ -57,7 +57,20 @@ function App() {
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Inicialización del lector de voz (TTS) desde el hook personalizado
-  const { speakComment, isEnabled: ttsEnabled, setIsEnabled: setTtsEnabled } = useNectarTTS();
+  const { 
+    speakComment, 
+    isEnabled: ttsEnabled, 
+    setIsEnabled: setTtsEnabled,
+    volume: ttsVolume,
+    setVolume: setTtsVolume,
+    rate: ttsRate,
+    setRate: setTtsRate,
+    pitch: ttsPitch,
+    setPitch: setTtsPitch,
+    selectedVoiceURI: ttsVoiceURI,
+    setSelectedVoiceURI: setTtsVoiceURI,
+    availableVoices: ttsVoices
+  } = useNectarTTS();
 
   // Consulta al backend de Rust para obtener los puertos de red asignados al motor Node
   const loadPorts = async () => {
@@ -619,6 +632,16 @@ function App() {
             onNewMessage={(user, text, platform) => speakComment(user, text, platform)}
             ttsEnabled={ttsEnabled}
             setTtsEnabled={setTtsEnabled}
+            ttsVolume={ttsVolume}
+            setTtsVolume={setTtsVolume}
+            ttsRate={ttsRate}
+            setTtsRate={setTtsRate}
+            ttsPitch={ttsPitch}
+            setTtsPitch={setTtsPitch}
+            ttsVoiceURI={ttsVoiceURI}
+            setTtsVoiceURI={setTtsVoiceURI}
+            ttsVoices={ttsVoices}
+            httpApiPort={httpApiPort}
           />
         </div>
 
