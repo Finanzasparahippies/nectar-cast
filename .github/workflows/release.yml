@@ -45,12 +45,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build RTMP engine
-        run: |
-          cd rtmp-engine
-          npm ci
-          npm run build
-          cd ..
+      - name: Setup sidecars (Engine & FFmpeg)
+        run: node scripts/setup-sidecars.cjs
 
       - name: Build Tauri App & Create Release
         uses: tauri-apps/tauri-action@v0

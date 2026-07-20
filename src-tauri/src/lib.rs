@@ -78,7 +78,6 @@ pub fn run() {
         let (mut rx, _child) = shell
             .sidecar("nectar-cast-engine")
             .unwrap()
-            .env("TAURI_TARGET_TRIPLE", "x86_64-unknown-linux-gnu")
             .env("RTMP_PORT", rtmp_port.to_string())
             .env("HTTP_PORT", http_port.to_string())
             .spawn()
