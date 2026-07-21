@@ -67,6 +67,11 @@ async function prepareTarget(targetTriple) {
     log(`Building ${engineBinName} using pkg...`);
     const pkgTarget = PKG_TARGETS[targetTriple];
     const rtmpDistIndex = path.join(RTMP_DIR, 'dist', 'index.js');
+    const rtmpNodeModules = path.join(RTMP_DIR, 'node_modules');
+    if (!fs.existsSync(rtmpNodeModules)) {
+      log('Installing rtmp-engine dependencies (npm ci)...');
+      execSync('npm ci', { cwd: RTMP_DIR, stdio: 'inherit' });
+    }
     if (!fs.existsSync(rtmpDistIndex)) {
       log('Building rtmp-engine dist/index.js first...');
       execSync('npm run build', { cwd: RTMP_DIR, stdio: 'inherit' });
