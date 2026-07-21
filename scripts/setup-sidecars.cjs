@@ -53,6 +53,47 @@ function downloadFile(url, dest) {
 async function prepareTarget(targetTriple) {
   log(`--- Setting up sidecars for target: ${targetTriple} ---`);
   
+  if (targetTriple === 'universal-apple-darwin') {
+    const engineUniversal = path.join(BIN_DIR, 'nectar-cast-engine-universal-apple-darwin');
+    const ffmpegUniversal = path.join(BIN_DIR, 'ffmpeg-universal-apple-darwin');
+
+    if (fs.existsSync(engineUniversal) && fs.existsSync(ffmpegUniversal)) {
+      log('Universal sidecars already exist.');
+      return;
+    }
+
+    await prepareTarget('aarch64-apple-darwin');
+    await prepareTarget('x86_64-apple-darwin');
+
+    log('Creating universal-apple-darwin sidecars with lipo...');
+    const engineArm = path.join(BIN_DIR, 'nectar-cast-engine-aarch64-apple-darwin');
+    const engineX64 = path.join(BIN_DIR, 'nectar-cast-engine-x86_64-apple-darwin');
+
+    const ffmpegArm = path.join(BIN_DIR, 'ffmpeg-aarch64-apple-darwin');
+    const ffmpegX64 = path.join(BIN_DIR, 'ffmpeg-x86_64-apple-darwin');
+
+    try {
+      execSync(`lipo -create -output "${engineUniversal}" "${engineArm}" "${engineX64}"`);
+      fs.chmodSync(engineUniversal, 0o755);
+      log(`Created ${engineUniversal} with lipo`);
+    } catch (e) {
+      log(`lipo failed for engine, falling back to copy arm64: ${e.message}`);
+      fs.copyFileSync(engineArm, engineUniversal);
+      fs.chmodSync(engineUniversal, 0o755);
+    }
+
+    try {
+      execSync(`lipo -create -output "${ffmpegUniversal}" "${ffmpegArm}" "${ffmpegX64}"`);
+      fs.chmodSync(ffmpegUniversal, 0o755);
+      log(`Created ${ffmpegUniversal} with lipo`);
+    } catch (e) {
+      log(`lipo failed for ffmpeg, falling back to copy arm64: ${e.message}`);
+      fs.copyFileSync(ffmpegArm, ffmpegUniversal);
+      fs.chmodSync(ffmpegUniversal, 0o755);
+    }
+    return;
+  }
+
   const isWin = targetTriple.includes('windows');
   const ext = isWin ? '.exe' : '';
 
@@ -123,7 +164,7 @@ async function main() {
         targets = ['x86_64-pc-windows-msvc'];
         break;
       case 'darwin':
-        targets = ['aarch64-apple-darwin', 'x86_64-apple-darwin'];
+        targets = ['aarch64-apple-darwin', 'x86_64-apple-darwin', 'universal-apple-darwin'];
         break;
       case 'linux':
       default:
